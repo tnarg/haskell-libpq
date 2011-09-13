@@ -303,7 +303,7 @@ data PollingStatus
     = PollingFailed
     | PollingReading
     | PollingWriting
-    | PollingOk deriving Show
+    | PollingOk deriving (Eq, Show)
 
 pollHelper :: (Ptr PGconn -> IO CInt)
            -> Connection
@@ -398,7 +398,7 @@ data ConnStatus
     | ConnectionSetEnv             -- ^ Negotiating environment-driven
                                    -- parameter settings.
     | ConnectionSSLStartup         -- ^ Negotiating SSL encryption.
-      deriving Show
+      deriving (Eq, Show)
 
 
 -- | Returns the status of the connection.
@@ -436,6 +436,7 @@ data TransactionStatus = TransIdle    -- ^ currently idle
                        | TransInTrans -- ^ idle, in a valid transaction block
                        | TransInError -- ^ idle, in a failed transaction block
                        | TransUnknown -- ^ the connection is bad
+                         deriving (Eq, Show)
 
 -- | Returns the current in-transaction status of the server.
 --
@@ -835,7 +836,7 @@ data ExecStatus = EmptyQuery    -- ^ The string sent to the server was empty.
                 | NonfatalError -- ^ A nonfatal error (a notice or
                                 -- warning) occurred.
                 | FatalError    -- ^ A fatal error occurred.
-                  deriving Show
+                  deriving (Eq, Show)
 
 instance Enum ExecStatus where
     toEnum (#const PGRES_EMPTY_QUERY)    = EmptyQuery
@@ -951,6 +952,8 @@ data FieldCode = DiagSeverity
                | DiagSourceFunction
                -- ^ The name of the source-code function reporting the
                -- error.
+
+               deriving (Eq, Show)
 
 
 instance Enum FieldCode where
@@ -1651,6 +1654,7 @@ isnonblocking connection = enumFromConn connection c_PQisnonblocking
 data FlushStatus = FlushOk
                  | FlushFailed
                  | FlushWriting
+                   deriving (Eq, Show)
 
 -- | Attempts to flush any queued output data to the server. Returns
 -- 'FlushOk' if successful (or if the send queue is empty),
