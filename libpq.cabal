@@ -33,3 +33,10 @@ Library
   Extra-Libraries:   pq
   -- Other-modules:
   Build-tools:       hsc2hs
+
+  other-extensions:    CPP
+                     , DeriveDataTypeable
+                     , EmptyDataDecls
+                     , ForeignFunctionInterface
+                     , OverloadedStrings
+                     , ScopedTypeVariables

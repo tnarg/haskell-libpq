@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, DeriveDataTypeable #-}
+{-# LANGUAGE OverloadedStrings, DeriveDataTypeable, CPP #-}
 -- |
 -- Module: Database.PQ.Utils
 --
@@ -176,11 +176,27 @@ withTransaction conn = withTransactionCustom conn "BEGIN"
 -- | Like 'withTransaction', but with a custom @BEGIN@ statement.
 withTransactionCustom :: Connection -> ByteString -> IO a -> IO a
 withTransactionCustom conn begin action
-    = E.mask $ \restore -> do
+    = portableMask $ \restore -> do
         _ <- execCommand conn begin
         r <- restore action `E.onException` execCommand conn "ROLLBACK"
         _ <- execCommand conn "COMMIT"
         return r
+
+-- | Like 'E.mask', but backported to base before version 4.3.0.
+--
+-- Note that the restore callback is monomorphic, unlike in 'E.mask'.
+-- This could be fixed by changing the type signature, but it would
+-- require us to enable the RankNTypes extension.  The 'withTransactionCustom'
+-- function above calls the restore callback only once, so we don't
+-- need that polymorphism.
+portableMask :: ((IO a -> IO a) -> IO b) -> IO b
+#if MIN_VERSION_base(4,3,0)
+portableMask io = E.mask $ \restore -> io restore
+#else
+portableMask io = do
+    b <- E.blocked
+    E.block $ io $ \m -> if b then m else E.unblock m
+#endif
 
 type PQParam = (PQ.Oid, ByteString, PQ.Format)
 
