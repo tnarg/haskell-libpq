@@ -4,6 +4,12 @@
 --
 -- Utility module that adds error handling and convenient conversion to
 -- and from SQL values.
+--
+-- This module is meant to be used instead of "Database.PQ", with the latter
+-- imported qualified if you need its entry points and types:
+--
+-- >import Database.PQ.Utils
+-- >import qualified Database.PQ as PQ
 
 module Database.PQ.Utils (
     -- * Connection
@@ -25,11 +31,9 @@ module Database.PQ.Utils (
     withTransactionCustom,
 
     -- * Conversion from SQL results
-    -- | 'PQ.Result' structures are read using a convenient 'Applicative'
-    -- interface.
-    --
-    -- Columns are requested by name.  Column names are looked up only once
-    -- per result set.
+    -- | Read tuples from 'PQ.Result' structures using a convenient
+    -- 'Applicative' interface.  Columns are requested by name.  Column names
+    -- are looked up only once per result set.
     --
     -- Example:
     --
@@ -54,15 +58,26 @@ module Database.PQ.Utils (
 
     ReadResult,
     readResult,
+
+    -- ** Column retrieval
     column,
     column',
     columnNotNull,
     columnNotNull',
+
+    -- ** Value conversion functions
+    -- |
+    -- These functions assume that the result has been retrieved in text
+    -- mode.  If you use the 'execTuples' and 'execTuplesParams' functions from
+    -- this module, you don't need to worry about this.  If you use 'PQ.execParams'
+    -- from "Database.PQ" and specify Binary as the 'PQ.Format', these functions
+    -- will not work correctly on datums retrieved from the 'PQ.Result'.
     fromText,
     fromBytea,
     fromBool,
     fromInt,
     fromFloat,
+    fromReadS,
 
     -- * Conversion to SQL parameters
     PQParam,
@@ -162,8 +177,11 @@ execCommand conn query = checkResult PQ.CommandOk conn =<< PQ.exec conn query
 
 -- | Execute a query that is expected to return data (such as @SELECT@ or @SHOW@).
 --
--- If the query fails, or does not return a result set,
--- a 'SqlError' is thrown.
+-- If the query fails, or does not return a result set, a 'SqlError' is thrown.
+--
+-- Bear in mind that in PostgreSQL, result rows are not returned lazily.
+-- If you want to read a large result set incrementally, you
+-- will need to use a cursor.  See 'consume' for an example.
 execTuples :: Connection -> ByteString -> IO PQ.Result
 execTuples conn query = checkResult PQ.TuplesOk conn =<< PQ.exec conn query
 
@@ -173,7 +191,9 @@ execTuples conn query = checkResult PQ.TuplesOk conn =<< PQ.exec conn query
 withTransaction :: Connection -> IO a -> IO a
 withTransaction conn = withTransactionCustom conn "BEGIN"
 
--- | Like 'withTransaction', but with a custom @BEGIN@ statement.
+-- | Like 'withTransaction', but with a custom \"begin\" statement.
+--
+-- @'withTransaction' conn = 'withTransactionCustom' conn \"BEGIN\"@
 withTransactionCustom :: Connection -> ByteString -> IO a -> IO a
 withTransactionCustom conn begin action
     = portableMask $ \restore -> do
@@ -236,12 +256,15 @@ instance Applicative ReadResult where
             v2 <- c2 row
             return (v1 v2)
 
+-- | Execute a 'ReadResult' computation on a 'PQ.Result'.
+--
+-- Each item in the resulting 'Vector' corresponds to a /row/ of the
+-- result set.
+--
 -- This function is strict in @record@.  As long as @record@ is in turn
 -- strict in its members, and as long as those members do not contain
 -- original copies of values returned by 'PQ.getvalue', result records
 -- should not pin down the entire 'PQ.Result'.
---
--- On the other hand, 'column' and 'columnNotNull' are strict in the value.
 readResult :: ReadResult record -> PQ.Result -> IO (Vector record)
 readResult r res = do
     readRowAction <- runReadResult r res
@@ -260,6 +283,7 @@ columnHelper colname f = ReadResult $ \res -> do
          Nothing  -> throwSqlError $ "Result set does not have column \""
                                       ++ colname ++ "\""
 
+-- | Retrieve a (nullable) column by name, and convert it using the given function.
 column :: String -> (ByteString -> a) -> ReadResult (Maybe a)
 column colname f = columnHelper colname $ \res row col -> do
     m <- PQ.getvalue res row col
@@ -267,6 +291,8 @@ column colname f = columnHelper colname $ \res row col -> do
          Nothing -> return Nothing
          Just v  -> return $! Just $! f v
 
+-- | Retrieve a column by name and convert it.  If the value is null,
+-- throw a 'SqlError'.
 columnNotNull :: String -> (ByteString -> a) -> ReadResult a
 columnNotNull colname f = columnHelper colname $ \res row col -> do
     m <- PQ.getvalue res row col
@@ -290,30 +316,54 @@ columnNotNull' colname f = columnHelper colname $ \res row col -> do
          Nothing -> throwSqlError $ "Unexpected null value in column \""
                                     ++ colname ++ "\""
 
+-- | Convert a @TEXT@ datum to a 'ByteString'.  This is just a 'B.copy'.
 fromText :: ByteString -> ByteString
 fromText = B.copy
 
+-- | Convert a @BYTEA@ datum to a 'ByteString'.  This performs conversion
+-- using 'PQ.unescapeBytea', throwing a 'SqlError' on failure.
 fromBytea :: ByteString -> ByteString
 fromBytea str =
     case unsafePerformIO $ PQ.unescapeBytea str of
          Just bstr -> bstr
-         Nothing   -> sqlError "PQunescapeBytea failed (possibly due to lack of memory)"
+         Nothing   -> sqlError "PQunescapeBytea failed"
 
+-- | Read a @BOOL@ datum.  The text representation of a @BOOL@ is a single
+-- character: @\'f\'@ or @\'t\'@.
 fromBool :: ByteString -> Bool
 fromBool str | str == C.singleton 'f' = False
              | str == C.singleton 't' = True
              | otherwise = sqlError "Invalid syntax for fromBool"
 
-fromReadS :: ReadS a -> String -> ByteString -> a
+-- | Convert a datum by converting its bytes to a 'String' and feeding
+-- it to a 'ReadS' parser.
+--
+-- See 'fromInt' and 'fromFloat' for examples.
+fromReadS :: ReadS a        -- ^ Parser
+          -> String         -- ^ Error message if parsing fails
+          -> ByteString     -- ^ Datum in text format (should consist solely
+                            --   of ASCII characters)
+          -> a
 fromReadS readS errmsg bstr =
     case [x | (x, "") <- readS (C.unpack bstr)] of
          [x] -> x
          []  -> sqlError errmsg
          _   -> sqlError (errmsg ++ " (ambiguous parse)")
 
+-- | Read any datum that can be parsed as an integer.
+--
+-- @'fromInt' = 'fromReadS' ('readSigned' 'readDec') \"Invalid syntax for fromInt\"@
 fromInt :: (Integral a) => ByteString -> a
 fromInt = fromReadS (readSigned readDec) "Invalid syntax for fromInt"
 
+-- | Read any datum that can be parsed as a floating point number.
+--
+-- This function should be able to accept the PostgreSQL text representation
+-- of any of the numeric types (except for weird ones like @MONEY@), but this has
+-- not been proven.  The @NaN@ and @Infinity@ syntax PostgreSQL uses are
+-- recognized by Haskell's 'readFloat'.
+--
+-- @'fromFloat' = 'fromReadS' ('readSigned' 'readFloat') \"Invalid syntax for fromFloat\"@
 fromFloat :: (RealFrac a) => ByteString -> a
 fromFloat = fromReadS (readSigned readFloat) "Invalid syntax for fromFloat"
 
@@ -343,8 +393,8 @@ toFloat n = toText $ C.pack $ showFloat n ""
 -- >consumeExample conn =
 -- >    withTransaction conn $ do
 -- >        _ <- execCommand conn
--- >             "DECLARE series_cursor NO SCROLL CURSOR FOR\
--- >             \ SELECT x, x*x AS y FROM generate_series(1,100) AS x"
+-- >             $  "DECLARE series_cursor NO SCROLL CURSOR FOR"
+-- >             ++ " SELECT x, x*x AS y FROM generate_series(1,100) AS x"
 -- >
 -- >        let parser :: ReadResult (Int, Int)
 -- >            parser =  (,)
